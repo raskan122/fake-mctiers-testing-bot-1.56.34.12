@@ -1,0 +1,446 @@
+"""
+/setup command — configure all bot channels, categories, and roles without editing files.
+All settings are persisted to data/settings.json and applied immediately.
+"""
+import discord
+from discord import app_commands
+from discord.ext import commands
+import logging
+import sys
+
+import config
+
+
+def _save_and_reload(updates: dict):
+    """Merge updates into settings.json and hot-reload config module values."""
+    s = config._load_settings()
+    s.update(updates)
+    config.save_settings(s)
+    # Apply directly to the live config module
+    mod = sys.modules["config"]
+    for k, v in updates.items():
+        setattr(mod, k, v)
+    config._rebuild_derived()
+
+
+def _cfg_id(value, fallback=1) -> int:
+    return value if value and value != 1 else fallback
+
+
+class SetupCog(commands.Cog, name="Setup"):
+    """Bot configuration commands (owner/admin only)."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    # ── Permission guard ──────────────────────────────────────────────────────
+    async def _is_admin(self, interaction: discord.Interaction) -> bool:
+        if not interaction.guild:
+            await interaction.response.send_message("Run this command inside your server.", ephemeral=True)
+            return False
+        if interaction.user.guild_permissions.administrator:
+            return True
+        # Also allow anyone with OWNER or MANAGER role configured
+        owner_role = interaction.guild.get_role(config.OWNER_ROLE_ID)
+        manager_role = interaction.guild.get_role(config.MANAGER_ROLE_ID)
+        for role in interaction.user.roles:
+            if role in (owner_role, manager_role):
+                return True
+        await interaction.response.send_message(
+            "You need **Administrator** permission or the configured Owner/Manager role to use /setup.",
+            ephemeral=True
+        )
+        return False
+
+    # ── Command group ─────────────────────────────────────────────────────────
+    setup_group = app_commands.Group(
+        name="setup",
+        description="Configure the bot (admin only)."
+    )
+
+    # ── /setup guild ──────────────────────────────────────────────────────────
+    @setup_group.command(name="guild", description="Set the server (guild) ID the bot operates in.")
+    async def setup_guild(self, interaction: discord.Interaction):
+        if not await self._is_admin(interaction):
+            return
+        guild_id = interaction.guild_id
+        _save_and_reload({"GUILD_ID": guild_id})
+        embed = discord.Embed(
+            title="Guild Configured",
+            description=f"Guild ID set to **{guild_id}**.\nRestart the bot for command sync to take effect.",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ── /setup channels ───────────────────────────────────────────────────────
+    @setup_group.command(
+        name="channels",
+        description="Set the main bot channels (logging, results, leaderboard, transcripts, etc.)."
+    )
+    @app_commands.describe(
+        logging="Channel for bot action logs",
+        results="Channel where test results are posted",
+        leaderboard="Channel for the leaderboard",
+        transcripts="Channel where ticket transcripts are saved",
+        queue_join="Channel where players join the queue",
+        request_test="Channel where players request tests (waitlist panel)",
+        end_of_month="Channel for end-of-month test summaries",
+        failed_quota="Channel for testers who failed quota",
+    )
+    async def setup_channels(
+        self,
+        interaction: discord.Interaction,
+        logging: discord.TextChannel = None,
+        results: discord.TextChannel = None,
+        leaderboard: discord.TextChannel = None,
+        transcripts: discord.TextChannel = None,
+        queue_join: discord.TextChannel = None,
+        request_test: discord.TextChannel = None,
+        end_of_month: discord.TextChannel = None,
+        failed_quota: discord.TextChannel = None,
+    ):
+        if not await self._is_admin(interaction):
+            return
+
+        updates = {}
+        if logging:       updates["LOGGING_CHANNEL_ID"] = logging.id
+        if results:       updates["RESULTS_CHANNEL_ID"] = results.id
+        if leaderboard:   updates["LEADERBOARD_CHANNEL_ID"] = leaderboard.id
+        if transcripts:   updates["TRANSCRIPTS_CHANNEL_ID"] = transcripts.id
+        if queue_join:    updates["QUEUE_JOIN_CHANNEL_ID"] = queue_join.id
+        if request_test:  updates["REQUEST_TEST_CHANNEL_ID"] = request_test.id
+        if end_of_month:  updates["TESTS_END_OF_THE_MONTH_CHANNEL_ID"] = end_of_month.id
+        if failed_quota:  updates["FAILED_QUOTA_TESTERS_CHANNEL_ID"] = failed_quota.id
+
+        if not updates:
+            return await interaction.response.send_message("No channels provided.", ephemeral=True)
+
+        _save_and_reload(updates)
+
+        lines = [f"**{k}** → <#{v}>" for k, v in updates.items()]
+        embed = discord.Embed(
+            title="Channels Updated",
+            description="\n".join(lines),
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ── /setup waitlist-channels ──────────────────────────────────────────────
+    @setup_group.command(
+        name="waitlist-channels",
+        description="Set the per-region waitlist channels."
+    )
+    @app_commands.describe(
+        eu_waitlist="EU waitlist channel",
+        na_waitlist="NA waitlist channel",
+        as_au_waitlist="AS/AU waitlist channel",
+    )
+    async def setup_waitlist_channels(
+        self,
+        interaction: discord.Interaction,
+        eu_waitlist: discord.TextChannel = None,
+        na_waitlist: discord.TextChannel = None,
+        as_au_waitlist: discord.TextChannel = None,
+    ):
+        if not await self._is_admin(interaction):
+            return
+
+        updates = {}
+        if eu_waitlist:   updates["EU_WAITLIST_CHANNEL_ID"] = eu_waitlist.id
+        if na_waitlist:   updates["NA_WAITLIST_CHANNEL_ID"] = na_waitlist.id
+        if as_au_waitlist: updates["AS_AU_WAITLIST_CHANNEL_ID"] = as_au_waitlist.id
+
+        if not updates:
+            return await interaction.response.send_message("No channels provided.", ephemeral=True)
+
+        _save_and_reload(updates)
+        lines = [f"**{k}** → <#{v}>" for k, v in updates.items()]
+        embed = discord.Embed(title="Waitlist Channels Updated", description="\n".join(lines), color=discord.Color.green())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ── /setup categories ─────────────────────────────────────────────────────
+    @setup_group.command(
+        name="categories",
+        description="Set the testing category channels."
+    )
+    @app_commands.describe(
+        eu="EU testing category",
+        na="NA testing category",
+        as_au="AS/AU testing category",
+        high="High-tier testing category",
+        overflow="Overflow testing category",
+    )
+    async def setup_categories(
+        self,
+        interaction: discord.Interaction,
+        eu: discord.CategoryChannel = None,
+        na: discord.CategoryChannel = None,
+        as_au: discord.CategoryChannel = None,
+        high: discord.CategoryChannel = None,
+        overflow: discord.CategoryChannel = None,
+    ):
+        if not await self._is_admin(interaction):
+            return
+
+        updates = {}
+        if eu:       updates["EU_TESTING_CATEGORY_ID"] = eu.id
+        if na:       updates["NA_TESTING_CATEGORY_ID"] = na.id
+        if as_au:    updates["AS_AU_TESTING_CATEGORY_ID"] = as_au.id
+        if high:     updates["HIGH_TESTING_CATEGORY_ID"] = high.id
+        if overflow: updates["TESTING_OVERFLOW_CATEGORY_ID"] = overflow.id
+
+        if not updates:
+            return await interaction.response.send_message("No categories provided.", ephemeral=True)
+
+        _save_and_reload(updates)
+        lines = [f"**{k}** → {v}" for k, v in updates.items()]
+        embed = discord.Embed(title="Categories Updated", description="\n".join(lines), color=discord.Color.green())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ── /setup roles ──────────────────────────────────────────────────────────
+    @setup_group.command(
+        name="roles",
+        description="Set the staff/permission roles."
+    )
+    @app_commands.describe(
+        owner="Owner role",
+        manager="Manager role",
+        developer="Developer role",
+        tierlist_admin="Tierlist Admin role",
+        regulator="Regulator role",
+        moderator="Moderator role",
+        senior_tester="Senior Tester role",
+        tester="Tester role",
+        booster="Booster role",
+        quota_exempt="Quota Exempt role",
+    )
+    async def setup_roles(
+        self,
+        interaction: discord.Interaction,
+        owner: discord.Role = None,
+        manager: discord.Role = None,
+        developer: discord.Role = None,
+        tierlist_admin: discord.Role = None,
+        regulator: discord.Role = None,
+        moderator: discord.Role = None,
+        senior_tester: discord.Role = None,
+        tester: discord.Role = None,
+        booster: discord.Role = None,
+        quota_exempt: discord.Role = None,
+    ):
+        if not await self._is_admin(interaction):
+            return
+
+        updates = {}
+        if owner:         updates["OWNER_ROLE_ID"] = owner.id
+        if manager:       updates["MANAGER_ROLE_ID"] = manager.id
+        if developer:     updates["DEVELOPER_ROLE_ID"] = developer.id
+        if tierlist_admin: updates["TIERLIST_ADMIN_ROLE_ID"] = tierlist_admin.id
+        if regulator:     updates["REGULATOR_ROLE_ID"] = regulator.id
+        if moderator:     updates["MODERATOR_ROLE_ID"] = moderator.id
+        if senior_tester: updates["SENIOR_TESTER_ROLE_ID"] = senior_tester.id
+        if tester:        updates["TESTER_ROLE_ID"] = tester.id
+        if booster:       updates["BOOSTER_ROLE_ID"] = booster.id
+        if quota_exempt:  updates["QUOTA_EXEMPT_ROLE_ID"] = quota_exempt.id
+
+        if not updates:
+            return await interaction.response.send_message("No roles provided.", ephemeral=True)
+
+        _save_and_reload(updates)
+        lines = [f"**{k}** → <@&{v}>" for k, v in updates.items()]
+        embed = discord.Embed(title="Staff Roles Updated", description="\n".join(lines), color=discord.Color.green())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ── /setup region-roles ───────────────────────────────────────────────────
+    @setup_group.command(
+        name="region-roles",
+        description="Set the region and waitlist roles."
+    )
+    @app_commands.describe(
+        eu_region="EU region role",
+        na_region="NA region role",
+        as_au_region="AS/AU region role",
+        eu_waitlist="EU waitlist role",
+        na_waitlist="NA waitlist role",
+        as_au_waitlist="AS/AU waitlist role",
+    )
+    async def setup_region_roles(
+        self,
+        interaction: discord.Interaction,
+        eu_region: discord.Role = None,
+        na_region: discord.Role = None,
+        as_au_region: discord.Role = None,
+        eu_waitlist: discord.Role = None,
+        na_waitlist: discord.Role = None,
+        as_au_waitlist: discord.Role = None,
+    ):
+        if not await self._is_admin(interaction):
+            return
+
+        updates = {}
+        if eu_region:     updates["EU_REGION_ROLE_ID"] = eu_region.id
+        if na_region:     updates["NA_REGION_ROLE_ID"] = na_region.id
+        if as_au_region:  updates["AS_AU_REGION_ROLE_ID"] = as_au_region.id
+        if eu_waitlist:   updates["EU_WAITLIST_ROLE_ID"] = eu_waitlist.id
+        if na_waitlist:   updates["NA_WAITLIST_ROLE_ID"] = na_waitlist.id
+        if as_au_waitlist: updates["AS_AU_WAITLIST_ROLE_ID"] = as_au_waitlist.id
+
+        if not updates:
+            return await interaction.response.send_message("No roles provided.", ephemeral=True)
+
+        _save_and_reload(updates)
+        lines = [f"**{k}** → <@&{v}>" for k, v in updates.items()]
+        embed = discord.Embed(title="Region Roles Updated", description="\n".join(lines), color=discord.Color.green())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ── /setup tier-roles ─────────────────────────────────────────────────────
+    @setup_group.command(
+        name="tier-roles",
+        description="Set the tier rank roles (HT1–LT5)."
+    )
+    @app_commands.describe(
+        ht1="High Tier 1 role", lt1="Low Tier 1 role",
+        ht2="High Tier 2 role", lt2="Low Tier 2 role",
+        ht3="High Tier 3 role", lt3="Low Tier 3 role",
+        ht4="High Tier 4 role", lt4="Low Tier 4 role",
+        ht5="High Tier 5 role", lt5="Low Tier 5 role",
+    )
+    async def setup_tier_roles(
+        self,
+        interaction: discord.Interaction,
+        ht1: discord.Role = None, lt1: discord.Role = None,
+        ht2: discord.Role = None, lt2: discord.Role = None,
+        ht3: discord.Role = None, lt3: discord.Role = None,
+        ht4: discord.Role = None, lt4: discord.Role = None,
+        ht5: discord.Role = None, lt5: discord.Role = None,
+    ):
+        if not await self._is_admin(interaction):
+            return
+
+        mapping = {
+            "HT1_ROLE_ID": ht1, "LT1_ROLE_ID": lt1,
+            "HT2_ROLE_ID": ht2, "LT2_ROLE_ID": lt2,
+            "HT3_ROLE_ID": ht3, "LT3_ROLE_ID": lt3,
+            "HT4_ROLE_ID": ht4, "LT4_ROLE_ID": lt4,
+            "HT5_ROLE_ID": ht5, "LT5_ROLE_ID": lt5,
+        }
+        updates = {k: v.id for k, v in mapping.items() if v is not None}
+
+        if not updates:
+            return await interaction.response.send_message("No tier roles provided.", ephemeral=True)
+
+        _save_and_reload(updates)
+        lines = [f"**{k}** → <@&{v}>" for k, v in updates.items()]
+        embed = discord.Embed(title="Tier Roles Updated", description="\n".join(lines), color=discord.Color.green())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ── /setup quota ──────────────────────────────────────────────────────────
+    @setup_group.command(name="quota", description="Set the monthly test quota for testers.")
+    @app_commands.describe(tests="Required tests per month (1–100)")
+    async def setup_quota(
+        self,
+        interaction: discord.Interaction,
+        tests: app_commands.Range[int, 1, 100]
+    ):
+        if not await self._is_admin(interaction):
+            return
+        _save_and_reload({"TESTER_QUOTA": tests})
+        embed = discord.Embed(
+            title="Quota Updated",
+            description=f"Monthly tester quota set to **{tests}** tests.",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ── /setup view ───────────────────────────────────────────────────────────
+    @setup_group.command(name="view", description="View the current bot configuration.")
+    async def setup_view(self, interaction: discord.Interaction):
+        if not await self._is_admin(interaction):
+            return
+
+        def ch(cid): return f"<#{cid}>" if cid and cid != 1 else "**Not set**"
+        def rl(rid): return f"<@&{rid}>" if rid and rid != 1 else "**Not set**"
+
+        embed = discord.Embed(
+            title="Bot Configuration",
+            color=discord.Color.blurple()
+        )
+        embed.add_field(
+            name="Guild",
+            value=f"ID: `{config.GUILD_ID}`",
+            inline=False
+        )
+        embed.add_field(
+            name="Main Channels",
+            value=(
+                f"Logging: {ch(config.LOGGING_CHANNEL_ID)}\n"
+                f"Results: {ch(config.RESULTS_CHANNEL_ID)}\n"
+                f"Leaderboard: {ch(config.LEADERBOARD_CHANNEL_ID)}\n"
+                f"Transcripts: {ch(config.TRANSCRIPTS_CHANNEL_ID)}\n"
+                f"Request Test: {ch(config.REQUEST_TEST_CHANNEL_ID)}\n"
+                f"Queue Join: {ch(config.QUEUE_JOIN_CHANNEL_ID)}\n"
+                f"End of Month: {ch(config.TESTS_END_OF_THE_MONTH_CHANNEL_ID)}\n"
+                f"Failed Quota: {ch(config.FAILED_QUOTA_TESTERS_CHANNEL_ID)}"
+            ),
+            inline=True
+        )
+        embed.add_field(
+            name="Waitlist Channels",
+            value=(
+                f"EU: {ch(config.EU_WAITLIST_CHANNEL_ID)}\n"
+                f"NA: {ch(config.NA_WAITLIST_CHANNEL_ID)}\n"
+                f"AS/AU: {ch(config.AS_AU_WAITLIST_CHANNEL_ID)}"
+            ),
+            inline=True
+        )
+        embed.add_field(
+            name="Categories",
+            value=(
+                f"EU: `{config.EU_TESTING_CATEGORY_ID}`\n"
+                f"NA: `{config.NA_TESTING_CATEGORY_ID}`\n"
+                f"AS/AU: `{config.AS_AU_TESTING_CATEGORY_ID}`\n"
+                f"High: `{config.HIGH_TESTING_CATEGORY_ID}`\n"
+                f"Overflow: `{config.TESTING_OVERFLOW_CATEGORY_ID}`"
+            ),
+            inline=True
+        )
+        embed.add_field(
+            name="Staff Roles",
+            value=(
+                f"Owner: {rl(config.OWNER_ROLE_ID)}\n"
+                f"Manager: {rl(config.MANAGER_ROLE_ID)}\n"
+                f"Developer: {rl(config.DEVELOPER_ROLE_ID)}\n"
+                f"Tierlist Admin: {rl(config.TIERLIST_ADMIN_ROLE_ID)}\n"
+                f"Regulator: {rl(config.REGULATOR_ROLE_ID)}\n"
+                f"Moderator: {rl(config.MODERATOR_ROLE_ID)}\n"
+                f"Senior Tester: {rl(config.SENIOR_TESTER_ROLE_ID)}\n"
+                f"Tester: {rl(config.TESTER_ROLE_ID)}\n"
+                f"Booster: {rl(config.BOOSTER_ROLE_ID)}\n"
+                f"Quota Exempt: {rl(config.QUOTA_EXEMPT_ROLE_ID)}"
+            ),
+            inline=True
+        )
+        embed.add_field(
+            name="Region Roles",
+            value=(
+                f"EU Region: {rl(config.EU_REGION_ROLE_ID)}\n"
+                f"NA Region: {rl(config.NA_REGION_ROLE_ID)}\n"
+                f"AS/AU Region: {rl(config.AS_AU_REGION_ROLE_ID)}\n"
+                f"EU Waitlist: {rl(config.EU_WAITLIST_ROLE_ID)}\n"
+                f"NA Waitlist: {rl(config.NA_WAITLIST_ROLE_ID)}\n"
+                f"AS/AU Waitlist: {rl(config.AS_AU_WAITLIST_ROLE_ID)}"
+            ),
+            inline=True
+        )
+        tier_roles_val = "\n".join(
+            f"{name}: {rl(getattr(config, f'{name}_ROLE_ID', 1))}"
+            for name in ["HT1", "LT1", "HT2", "LT2", "HT3", "LT3", "HT4", "LT4", "HT5", "LT5"]
+        )
+        embed.add_field(name="Tier Roles", value=tier_roles_val, inline=True)
+        embed.add_field(name="Tester Quota", value=f"{config.TESTER_QUOTA} tests/month", inline=False)
+        embed.set_footer(text="Use /setup <subcommand> to configure each section.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(SetupCog(bot))
